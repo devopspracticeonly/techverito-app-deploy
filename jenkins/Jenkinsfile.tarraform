@@ -1,0 +1,143 @@
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'test', 'prod'],
+            description: 'Select Terraform environment'
+        )
+
+        choice(
+            name: 'ACTION',
+            choices: ['plan', 'apply'],
+            description: 'Plan or apply infrastructure'
+        )
+    }
+
+    environment {
+        TF_IN_AUTOMATION = 'true'
+        TF_INPUT = 'false'
+        AWS_REGION = 'ap-south-1'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Check Branch') {
+            steps {
+                script {
+                    if (params.ACTION == 'apply' &&
+                        env.BRANCH_NAME != 'main') {
+                        error('Terraform apply is allowed only from main')
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Format') {
+            steps {
+                sh '''
+                    terraform fmt -check -recursive terraform/
+                '''
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                dir("terraform/environments/${ENVIRONMENT}") {
+                    sh '''
+                        terraform init \
+                          -input=false \
+                          -backend-config="key=techverito/${ENVIRONMENT}/terraform.tfstate"
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                dir("terraform/environments/${ENVIRONMENT}") {
+                    sh '''
+                        terraform validate
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                dir("terraform/environments/${ENVIRONMENT}") {
+                    sh '''
+                        terraform plan \
+                          -input=false \
+                          -var-file=terraform.tfvars \
+                          -out=tfplan
+
+                        terraform show -no-color tfplan > plan.txt
+                    '''
+
+                    archiveArtifacts artifacts: 'plan.txt',
+                                     fingerprint: true
+                }
+            }
+        }
+
+        stage('Approval') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                script {
+                    def message =
+                        "Approve Terraform APPLY for ${params.ENVIRONMENT}?"
+
+                    input message: message,
+                          ok: 'Apply Infrastructure'
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                dir("terraform/environments/${ENVIRONMENT}") {
+                    sh '''
+                        terraform apply \
+                          -input=false \
+                          -auto-approve \
+                          tfplan
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Terraform ${ACTION} completed for ${ENVIRONMENT}"
+        }
+
+        failure {
+            echo "Terraform pipeline failed. Check the stage logs."
+        }
+
+        always {
+            cleanWs()
+        }
+    }
+}
