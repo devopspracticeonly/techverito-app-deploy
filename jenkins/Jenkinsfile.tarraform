@@ -1,143 +1,156 @@
-
 pipeline {
     agent any
 
     options {
         timestamps()
         disableConcurrentBuilds()
-        skipDefaultCheckout(true)
+        buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
     parameters {
-        choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'test', 'prod'],
-            description: 'Select Terraform environment'
-        )
-
-        choice(
-            name: 'ACTION',
-            choices: ['plan', 'apply'],
-            description: 'Plan or apply infrastructure'
-        )
+        choice(name: 'ENVIRONMENT', choices: ['dev', 'test', 'prod'],
+               description: 'Terraform environment directory to deploy')
+        choice(name: 'ACTION', choices: ['plan', 'apply'],
+               description: 'Run a Terraform plan or apply the reviewed plan')
     }
 
     environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_CREDENTIALS_ID = 'aws-jenkins-credentials'
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
-        AWS_REGION = 'ap-south-1'
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Check Branch') {
+        stage('Validate inputs and tools') {
             steps {
                 script {
-                    if (params.ACTION == 'apply' &&
-                        env.BRANCH_NAME != 'main') {
-                        error('Terraform apply is allowed only from main')
+                    if (!(params.ENVIRONMENT in ['dev', 'test', 'prod'])) {
+                        error("Unsupported environment: ${params.ENVIRONMENT}")
+                    }
+                    env.TF_ROOT = "terraform/environments/${params.ENVIRONMENT}"
+                }
+                sh '''
+                    set -eu
+                    test -d "$TF_ROOT"
+                    command -v terraform
+                    command -v aws
+                    terraform version
+                    aws --version
+                '''
+            }
+        }
+
+        stage('Terraform fmt, init and validate') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS_ID}"],
+                    string(
+                        credentialsId: "terraform-db-password-${params.ENVIRONMENT}",
+                        variable: 'TF_VAR_db_password'
+                    )
+                ]) {
+                    dir("${TF_ROOT}") {
+                        sh '''
+                            set -eu
+                            terraform fmt -check -recursive ../../..
+                            terraform init -input=false
+                            terraform validate
+                        '''
                     }
                 }
             }
         }
 
-        stage('Terraform Format') {
+        stage('Terraform plan') {
             steps {
-                sh '''
-                    terraform fmt -check -recursive terraform/
-                '''
-            }
-        }
-
-        stage('Terraform Init') {
-            steps {
-                dir("terraform/environments/${ENVIRONMENT}") {
-                    sh '''
-                        terraform init \
-                          -input=false \
-                          -backend-config="key=techverito/${ENVIRONMENT}/terraform.tfstate"
-                    '''
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS_ID}"],
+                    string(
+                        credentialsId: "terraform-db-password-${params.ENVIRONMENT}",
+                        variable: 'TF_VAR_db_password'
+                    )
+                ]) {
+                    dir("${TF_ROOT}") {
+                        sh '''
+                            set -eu
+                            aws sts get-caller-identity
+                            terraform plan \\
+                              -input=false \\
+                              -lock-timeout=5m \\
+                              -out=tfplan
+                        '''
+                    }
                 }
             }
         }
 
-        stage('Terraform Validate') {
+        stage('Approve production apply') {
+            when {
+                allOf {
+                    expression { params.ACTION == 'apply' }
+                    expression { params.ENVIRONMENT == 'prod' }
+                }
+            }
             steps {
-                dir("terraform/environments/${ENVIRONMENT}") {
-                    sh '''
-                        terraform validate
-                    '''
+                timeout(time: 15, unit: 'MINUTES') {
+                    input(
+                        message: 'Approve applying the reviewed Terraform plan to PRODUCTION?',
+                        ok: 'Approve production apply'
+                    )
                 }
             }
         }
 
-        stage('Terraform Plan') {
-            steps {
-                dir("terraform/environments/${ENVIRONMENT}") {
-                    sh '''
-                        terraform plan \
-                          -input=false \
-                          -var-file=terraform.tfvars \
-                          -out=tfplan
-
-                        terraform show -no-color tfplan > plan.txt
-                    '''
-
-                    archiveArtifacts artifacts: 'plan.txt',
-                                     fingerprint: true
-                }
-            }
-        }
-
-        stage('Approval') {
+        stage('Apply') {
             when {
                 expression { params.ACTION == 'apply' }
             }
             steps {
-                script {
-                    def message =
-                        "Approve Terraform APPLY for ${params.ENVIRONMENT}?"
-
-                    input message: message,
-                          ok: 'Apply Infrastructure'
-                }
-            }
-        }
-
-        stage('Terraform Apply') {
-            when {
-                expression { params.ACTION == 'apply' }
-            }
-            steps {
-                dir("terraform/environments/${ENVIRONMENT}") {
-                    sh '''
-                        terraform apply \
-                          -input=false \
-                          -auto-approve \
-                          tfplan
-                    '''
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: "${AWS_CREDENTIALS_ID}"],
+                    string(
+                        credentialsId: "terraform-db-password-${params.ENVIRONMENT}",
+                        variable: 'TF_VAR_db_password'
+                    )
+                ]) {
+                    dir("${TF_ROOT}") {
+                        sh '''
+                            set -eu
+                            test -f tfplan
+                            terraform apply -input=false -lock-timeout=5m tfplan
+                        '''
+                    }
                 }
             }
         }
     }
 
     post {
-        success {
-            echo "Terraform ${ACTION} completed for ${ENVIRONMENT}"
-        }
-
-        failure {
-            echo "Terraform pipeline failed. Check the stage logs."
-        }
-
         always {
-            cleanWs()
+            script {
+                if (env.TF_ROOT) {
+                    dir("${env.TF_ROOT}") {
+                        sh 'rm -f tfplan || true'
+                    }
+                }
+            }
+            deleteDir()
+        }
+        success {
+            echo "Terraform ${params.ACTION} completed for ${params.ENVIRONMENT}."
+        }
+        failure {
+            echo "Terraform pipeline failed for ${params.ENVIRONMENT}. Review the stage logs."
         }
     }
 }
