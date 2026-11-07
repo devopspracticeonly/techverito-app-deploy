@@ -188,6 +188,7 @@ pipeline {
                         script: '''#!/bin/bash
                             set +x
                             set -Eeuo pipefail
+							echo "running ai_failure_analyzer.py"
 
                             python3 scripts/ai_failure_analyzer.py
                         ''',
