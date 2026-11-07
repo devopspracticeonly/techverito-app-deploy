@@ -20,7 +20,7 @@ pipeline {
         DB_SECRET_ID = 'database_secrets'
         GEMINI_SECRET_ID = 'gemini_access_token'
         GEMINI_SECRET_JSON_KEY = 'gemini_access_token'
-        GEMINI_MODEL_ID = 'gemini-2.5-flash'
+        GEMINI_MODEL_ID = 'gemini-3.8-flash'
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
     }
@@ -194,11 +194,15 @@ print(value)
             script {
                 echo 'Pipeline failed. Starting Gemini failure analysis.'
 
+                // Keep the original build failed, but do not let a Gemini/API
+                // problem prevent the log and any generated report being archived.
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                     sh '''#!/usr/bin/env bash
                         set -Eeuo pipefail
                         set +x
 
+                        mkdir -p "$WORKSPACE"
+                        touch "$WORKSPACE/pipeline.log"
                         echo "Starting Gemini analysis for ${JOB_NAME} #${BUILD_NUMBER}" \
                             | tee -a "$WORKSPACE/pipeline.log"
 
@@ -226,13 +230,15 @@ print(value)
 
                         unset GEMINI_API_KEY
                     '''
-
-                    archiveArtifacts(
-                        artifacts: 'AI_FAILURE_REPORT.md,pipeline.log',
-                        allowEmptyArchive: true,
-                        fingerprint: true
-                    )
                 }
+
+                // IMPORTANT: archive outside catchError. This runs even when
+                // retrieving the Gemini secret or calling Gemini fails.
+                archiveArtifacts(
+                    artifacts: 'AI_FAILURE_REPORT.md,pipeline.log',
+                    allowEmptyArchive: true,
+                    fingerprint: true
+                )
             }
         }
 
@@ -251,6 +257,7 @@ print(value)
         }
 
         cleanup {
+            // Runs after the other post conditions, including artifact archiving.
             deleteDir()
         }
     }
