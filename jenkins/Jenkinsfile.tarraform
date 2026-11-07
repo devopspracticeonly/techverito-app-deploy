@@ -15,7 +15,7 @@ pipeline {
     }
 
     environment {
-        AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_DEFAULT_REGION = 'us-east-1'
         AWS_SECRETS_REGION = 'us-east-1'
         DB_SECRET_ID = 'database_secrets'
         GEMINI_SECRET_ID = 'gemini_access_token'
