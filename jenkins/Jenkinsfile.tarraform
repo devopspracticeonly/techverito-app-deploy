@@ -9,20 +9,6 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
-    parameters {
-        choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'test', 'prod'],
-            description: 'Terraform environment to deploy'
-        )
-
-        choice(
-            name: 'ACTION',
-            choices: ['plan', 'apply'],
-            description: 'Run Terraform plan or apply'
-        )
-    }
-
     environment {
         AWS_DEFAULT_REGION = 'us-east-1'
         AWS_SECRETS_REGION = 'us-east-1'
@@ -34,6 +20,11 @@ pipeline {
 
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
+
+        // These values are assigned dynamically from BRANCH_NAME.
+        ENVIRONMENT = ''
+        ACTION = ''
+        TF_ROOT = ''
 
         TF_CHECKS_PASSED = 'false'
     }
@@ -55,27 +46,74 @@ pipeline {
                     echo "Build: ${JOB_NAME} #${BUILD_NUMBER}" \
                         | tee -a "$WORKSPACE/pipeline.log"
 
-                    echo "Environment: ${ENVIRONMENT}" \
-                        | tee -a "$WORKSPACE/pipeline.log"
-
-                    echo "Action: ${ACTION}" \
-                        | tee -a "$WORKSPACE/pipeline.log"
                 '''
             }
         }
 
+
         // ---------------------------------------------
-        // 2. VALIDATE TOOLS AND AWS ROLE
+        // 2. SELECT ENVIRONMENT AND ACTION FROM BRANCH
+        // ---------------------------------------------
+        stage('Set deployment environment') {
+            steps {
+                script {
+                    def branch = env.BRANCH_NAME
+
+                    if (!branch) {
+                        error('BRANCH_NAME is not available. Run this pipeline as a Jenkins Multibranch Pipeline.')
+                    }
+
+                    switch (branch) {
+                        case 'dev':
+                            env.ENVIRONMENT = 'dev'
+                            env.ACTION = 'apply'
+                            break
+
+                        case 'test':
+                            env.ENVIRONMENT = 'test'
+                            env.ACTION = 'apply'
+                            break
+
+                        case 'main':
+                            env.ENVIRONMENT = 'prod'
+                            env.ACTION = 'apply'
+                            break
+
+                        default:
+                            // Feature, bugfix, hotfix and all other branches are plan-only.
+                            env.ENVIRONMENT = 'dev'
+                            env.ACTION = 'plan'
+                            break
+                    }
+
+                    env.TF_ROOT = "terraform/environments/${env.ENVIRONMENT}"
+
+                    currentBuild.description = "Branch: ${branch} | Environment: ${env.ENVIRONMENT} | Action: ${env.ACTION}"
+
+                    echo '========== BRANCH DEPLOYMENT CONFIGURATION =========='
+                    echo "Git branch: ${branch}"
+                    echo "Terraform environment: ${env.ENVIRONMENT}"
+                    echo "Pipeline action: ${env.ACTION}"
+                    echo "Terraform root: ${env.TF_ROOT}"
+                }
+            }
+        }
+
+        // ---------------------------------------------
+        // 3. VALIDATE TOOLS AND AWS ROLE
         // ---------------------------------------------
         stage('Validate inputs, tools and AWS role') {
             steps {
                 script {
-                    if (!(params.ENVIRONMENT in ['dev', 'test', 'prod'])) {
-                        error("Unsupported environment: ${params.ENVIRONMENT}")
+                    if (!(env.ENVIRONMENT in ['dev', 'test', 'prod'])) {
+                        error("Unsupported environment selected from branch: ${env.ENVIRONMENT}")
                     }
 
-                    env.TF_ROOT =
-                        "terraform/environments/${params.ENVIRONMENT}"
+                    if (!(env.ACTION in ['plan', 'apply'])) {
+                        error("Unsupported pipeline action selected from branch: ${env.ACTION}")
+                    }
+
+                    echo "Validated branch mapping: ${env.BRANCH_NAME} -> ${env.ENVIRONMENT} (${env.ACTION})"
                 }
 
                 sh '''#!/usr/bin/env bash
@@ -105,7 +143,7 @@ pipeline {
         }
 
         // ---------------------------------------------
-        // 3. TERRAFORM FMT, INIT AND VALIDATE
+        // 4. TERRAFORM FMT, INIT AND VALIDATE
         // ALLOW FAILURE AND CONTINUE
         // ---------------------------------------------
         stage('Terraform fmt, init and validate') {
@@ -191,7 +229,7 @@ pipeline {
         }
 
         // ---------------------------------------------
-        // 4. TERRAFORM PLAN
+        // 5. TERRAFORM PLAN
         // ---------------------------------------------
         stage('Terraform plan') {
             steps {
@@ -253,22 +291,22 @@ print(value)
         }
 
         // ---------------------------------------------
-        // 5. PRODUCTION APPROVAL
+        // 6. PRODUCTION APPROVAL
         // ---------------------------------------------
         stage('Approve production apply') {
             when {
                 allOf {
                     expression {
-                        params.ACTION == 'apply'
+                        env.ACTION == 'apply'
                     }
 
                     expression {
-                        params.ENVIRONMENT == 'prod'
+                        env.ENVIRONMENT == 'prod'
                     }
 
-                   // expression {
-                   //     env.TF_CHECKS_PASSED == 'true'
-                    //}
+                    expression {
+                        env.TF_CHECKS_PASSED == 'true'
+                    }
                 }
             }
 
@@ -283,14 +321,14 @@ print(value)
         }
 
         // ---------------------------------------------
-        // 6. TERRAFORM APPLY
+        // 7. TERRAFORM APPLY
         // SKIP IF CHECKS FAILED
         // ---------------------------------------------
         stage('Terraform apply') {
             when {
                 allOf {
                     expression {
-                        params.ACTION == 'apply'
+                        env.ACTION == 'apply'
                     }
 
                     expression {
@@ -411,7 +449,7 @@ print(value)
         // SUCCESS
         // -----------------------------------------
         success {
-            echo "Terraform ${params.ACTION} completed successfully for ${params.ENVIRONMENT}."
+            echo "Terraform ${env.ACTION} completed successfully for ${env.ENVIRONMENT}."
         }
 
         // -----------------------------------------
@@ -442,3 +480,4 @@ print(value)
         }
     }
 }
+	
