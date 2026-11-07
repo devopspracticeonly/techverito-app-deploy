@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -8,14 +9,22 @@ pipeline {
     }
 
     parameters {
-        choice(name: 'ENVIRONMENT', choices: ['dev', 'test', 'prod'],
-               description: 'Terraform environment directory to deploy')
-        choice(name: 'ACTION', choices: ['plan', 'apply'],
-               description: 'Run a Terraform plan or apply the generated plan')
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'test', 'prod'],
+            description: 'Terraform environment'
+        )
+        choice(
+            name: 'ACTION',
+            choices: ['plan', 'apply'],
+            description: 'Terraform action'
+        )
     }
 
     environment {
-        AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_DEFAULT_REGION = 'us-east-1'
+        SECRETS_MANAGER_REGION = 'us-east-1'
+        SECRET_ID = 'database_secrets'
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
     }
@@ -33,17 +42,24 @@ pipeline {
                     if (!(params.ENVIRONMENT in ['dev', 'test', 'prod'])) {
                         error("Unsupported environment: ${params.ENVIRONMENT}")
                     }
-                    env.TF_ROOT = "terraform/environments/${params.ENVIRONMENT}"
+
+                    env.TF_ROOT =
+                        "terraform/environments/${params.ENVIRONMENT}"
                 }
+
                 sh '''
                     set -eu
+
                     test -d "$TF_ROOT"
+
                     command -v terraform
                     command -v aws
+                    command -v jq
+
                     terraform version
                     aws --version
 
-                    # Uses the IAM role attached to this Jenkins agent.
+                    echo "Checking AWS IAM role authentication..."
                     aws sts get-caller-identity
                 '''
             }
@@ -51,41 +67,52 @@ pipeline {
 
         stage('Terraform fmt, init and validate') {
             steps {
-                withCredentials([
-                    string(
-                        credentialsId: "terraform-db-password-${params.ENVIRONMENT}",
-                        variable: 'TF_VAR_db_password'
-                    )
-                ]) {
-                    dir("${TF_ROOT}") {
-                        sh '''
-                            set -eu
-                            terraform fmt -check -recursive ../../..
-                            terraform init -input=false
-                            terraform validate
-                        '''
-                    }
+                dir("${TF_ROOT}") {
+                    sh '''
+                        set -eu
+
+                        terraform fmt -check -recursive ../../..
+                        terraform init -input=false
+                        terraform validate
+                    '''
                 }
             }
         }
 
         stage('Terraform plan') {
             steps {
-                withCredentials([
-                    string(
-                        credentialsId: "terraform-db-password-${params.ENVIRONMENT}",
-                        variable: 'TF_VAR_db_password'
-                    )
-                ]) {
-                    dir("${TF_ROOT}") {
-                        sh '''
-                            set -eu
-                            terraform plan \\
-                              -input=false \\
-                              -lock-timeout=5m \\
-                              -out=tfplan
-                        '''
-                    }
+                dir("${TF_ROOT}") {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        echo "Retrieving database password from AWS Secrets Manager..."
+
+                        DB_PASSWORD=$(aws secretsmanager get-secret-value \
+                            --region "$SECRETS_MANAGER_REGION" \
+                            --secret-id "$SECRET_ID" \
+                            --query SecretString \
+                            --output text |
+                            jq -r --arg key "techverito/${ENVIRONMENT}/db-password" \
+                            '.[$key] // empty')
+
+                        if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" = "null" ]; then
+                            echo "ERROR: Database password not found in Secrets Manager"
+                            exit 1
+                        fi
+
+                        export TF_VAR_db_password="$DB_PASSWORD"
+
+                        echo "Running Terraform plan..."
+
+                        terraform plan \
+                            -input=false \
+                            -lock-timeout=5m \
+                            -out=tfplan
+
+                        unset TF_VAR_db_password
+                        unset DB_PASSWORD
+                    '''
                 }
             }
         }
@@ -112,19 +139,19 @@ pipeline {
                 expression { params.ACTION == 'apply' }
             }
             steps {
-                withCredentials([
-                    string(
-                        credentialsId: "terraform-db-password-${params.ENVIRONMENT}",
-                        variable: 'TF_VAR_db_password'
-                    )
-                ]) {
-                    dir("${TF_ROOT}") {
-                        sh '''
-                            set -eu
-                            test -f tfplan
-                            terraform apply -input=false -lock-timeout=5m tfplan
-                        '''
-                    }
+                dir("${TF_ROOT}") {
+                    sh '''
+                        set -eu
+
+                        test -f tfplan
+
+                        echo "Applying Terraform plan..."
+
+                        terraform apply \
+                            -input=false \
+                            -lock-timeout=5m \
+                            tfplan
+                    '''
                 }
             }
         }
@@ -139,13 +166,16 @@ pipeline {
                     }
                 }
             }
+
             deleteDir()
         }
+
         success {
             echo "Terraform ${params.ACTION} completed for ${params.ENVIRONMENT}."
         }
+
         failure {
-            echo "Terraform pipeline failed for ${params.ENVIRONMENT}. Review the stage logs."
+            echo "Terraform pipeline failed for ${params.ENVIRONMENT}. Review the logs."
         }
     }
 }
