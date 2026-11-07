@@ -22,9 +22,12 @@ pipeline {
     }
 
     environment {
-        AWS_DEFAULT_REGION = 'us-east-1'
+        AWS_DEFAULT_REGION = 'ap-south-1'
         SECRETS_MANAGER_REGION = 'us-east-1'
         SECRET_ID = 'database_secrets'
+
+        GEMINI_MODEL_ID = 'gemini-3.8-flash'
+
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
     }
@@ -36,30 +39,41 @@ pipeline {
             }
         }
 
+        stage('Initialize build log') {
+            steps {
+                sh '''
+                    set -eu
+                    : > "$WORKSPACE/pipeline.log"
+                '''
+            }
+        }
+
         stage('Validate inputs and tools') {
             steps {
                 script {
                     if (!(params.ENVIRONMENT in ['dev', 'test', 'prod'])) {
-                        error("Unsupported environment: ${params.ENVIRONMENT}")
+                        error("Unsupported environment")
                     }
 
                     env.TF_ROOT =
                         "terraform/environments/${params.ENVIRONMENT}"
                 }
 
-                sh '''
-                    set -eu
+                sh '''#!/bin/bash
+                    set -Eeuo pipefail
+                    exec > >(tee -a "$WORKSPACE/pipeline.log") 2>&1
 
                     test -d "$TF_ROOT"
 
                     command -v terraform
                     command -v aws
                     command -v jq
+                    command -v python3
 
                     terraform version
                     aws --version
 
-                    echo "Checking AWS IAM role authentication..."
+                    echo "Checking AWS IAM role..."
                     aws sts get-caller-identity
                 '''
             }
@@ -68,8 +82,9 @@ pipeline {
         stage('Terraform fmt, init and validate') {
             steps {
                 dir("${TF_ROOT}") {
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -Eeuo pipefail
+                        exec > >(tee -a "$WORKSPACE/pipeline.log") 2>&1
 
                         terraform fmt -check -recursive ../../..
                         terraform init -input=false
@@ -82,28 +97,29 @@ pipeline {
         stage('Terraform plan') {
             steps {
                 dir("${TF_ROOT}") {
-                    sh '''
+                    sh '''#!/bin/bash
+                        set -Eeuo pipefail
                         set +x
-                        set -eu
+                        exec > >(tee -a "$WORKSPACE/pipeline.log") 2>&1
 
-                        echo "Retrieving database password from AWS Secrets Manager..."
+                        echo "Getting DB password from AWS Secrets Manager"
 
-                        DB_PASSWORD=$(aws secretsmanager get-secret-value \
+                        DB_PASSWORD="$(aws secretsmanager get-secret-value \
                             --region "$SECRETS_MANAGER_REGION" \
                             --secret-id "$SECRET_ID" \
                             --query SecretString \
                             --output text |
-                            jq -r --arg key "techverito/${ENVIRONMENT}/db-password" \
-                            '.[$key] // empty')
+                            jq -r --arg key \
+                            "techverito/${ENVIRONMENT}/db-password" \
+                            '.[$key] // empty')"
 
-                        if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" = "null" ]; then
-                            echo "ERROR: Database password not found in Secrets Manager"
+                        if [[ -z "$DB_PASSWORD" || "$DB_PASSWORD" == "null" ]]; then
+                            echo "Database password not found"
                             exit 1
                         fi
 
                         export TF_VAR_db_password="$DB_PASSWORD"
-
-                        echo "Running Terraform plan..."
+                        unset DB_PASSWORD
 
                         terraform plan \
                             -input=false \
@@ -111,7 +127,6 @@ pipeline {
                             -out=tfplan
 
                         unset TF_VAR_db_password
-                        unset DB_PASSWORD
                     '''
                 }
             }
@@ -127,8 +142,8 @@ pipeline {
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
                     input(
-                        message: 'Approve applying the reviewed Terraform plan to PRODUCTION?',
-                        ok: 'Approve production apply'
+                        message: 'Approve production Terraform apply?',
+                        ok: 'Approve'
                     )
                 }
             }
@@ -140,12 +155,11 @@ pipeline {
             }
             steps {
                 dir("${TF_ROOT}") {
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -Eeuo pipefail
+                        exec > >(tee -a "$WORKSPACE/pipeline.log") 2>&1
 
                         test -f tfplan
-
-                        echo "Applying Terraform plan..."
 
                         terraform apply \
                             -input=false \
@@ -158,24 +172,56 @@ pipeline {
     }
 
     post {
-        always {
+        failure {
+            script {
+                echo "Pipeline failed. Starting Gemini AI analysis."
+
+                int analyzerStatus = -1
+
+                withCredentials([
+                    string(
+                        credentialsId: 'gemini-api-key',
+                        variable: 'GEMINI_API_KEY'
+                    )
+                ]) {
+                    analyzerStatus = sh(
+                        script: '''#!/bin/bash
+                            set +x
+                            set -Eeuo pipefail
+
+                            python3 scripts/ai_failure_analyzer.py
+                        ''',
+                        returnStatus: true
+                    )
+                }
+
+                if (fileExists('AI_FAILURE_REPORT.md')) {
+                    archiveArtifacts(
+                        artifacts: 'AI_FAILURE_REPORT.md',
+                        fingerprint: true
+                    )
+
+                    echo "Gemini AI report archived successfully."
+                } else {
+                    echo "AI analyzer failed with exit code: ${analyzerStatus}"
+                }
+            }
+        }
+
+        cleanup {
             script {
                 if (env.TF_ROOT) {
                     dir("${env.TF_ROOT}") {
                         sh 'rm -f tfplan || true'
                     }
                 }
-            }
 
-            deleteDir()
+                deleteDir()
+            }
         }
 
         success {
             echo "Terraform ${params.ACTION} completed for ${params.ENVIRONMENT}."
-        }
-
-        failure {
-            echo "Terraform pipeline failed for ${params.ENVIRONMENT}. Review the logs."
         }
     }
 }
