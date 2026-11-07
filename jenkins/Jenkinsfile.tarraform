@@ -5,84 +5,145 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        skipDefaultCheckout(true)
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
     parameters {
-        choice(name: 'ENVIRONMENT', choices: ['dev', 'test', 'prod'],
-               description: 'Terraform environment to deploy')
-        choice(name: 'ACTION', choices: ['plan', 'apply'],
-               description: 'Run a Terraform plan or apply the generated plan')
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'test', 'prod'],
+            description: 'Terraform environment to deploy'
+        )
+
+        choice(
+            name: 'ACTION',
+            choices: ['plan', 'apply'],
+            description: 'Run Terraform plan or apply the generated plan'
+        )
     }
 
     environment {
         AWS_DEFAULT_REGION = 'us-east-1'
         AWS_SECRETS_REGION = 'us-east-1'
+
         DB_SECRET_ID = 'database_secrets'
         GEMINI_SECRET_ID = 'gemini_access_token'
         GEMINI_SECRET_JSON_KEY = 'gemini_access_token'
         GEMINI_MODEL_ID = 'gemini-3.8-flash'
+
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
     }
 
     stages {
+
+        // ------------------------------------------------
+        // 1. CHECKOUT
+        // ------------------------------------------------
         stage('Checkout') {
             steps {
                 checkout scm
+
                 sh '''#!/usr/bin/env bash
                     set -Eeuo pipefail
+
                     : > "$WORKSPACE/pipeline.log"
-                    echo "Build started: ${JOB_NAME} #${BUILD_NUMBER}" | tee -a "$WORKSPACE/pipeline.log"
-                    echo "Environment: ${ENVIRONMENT}; action: ${ACTION}" | tee -a "$WORKSPACE/pipeline.log"
+
+                    echo "Build started: ${JOB_NAME} #${BUILD_NUMBER}" \
+                        | tee -a "$WORKSPACE/pipeline.log"
+
+                    echo "Environment: ${ENVIRONMENT}; Action: ${ACTION}" \
+                        | tee -a "$WORKSPACE/pipeline.log"
                 '''
             }
         }
 
+        // ------------------------------------------------
+        // 2. VALIDATE INPUTS AND TOOLS
+        // ------------------------------------------------
         stage('Validate inputs, tools and AWS role') {
             steps {
                 script {
                     if (!(params.ENVIRONMENT in ['dev', 'test', 'prod'])) {
                         error("Unsupported environment: ${params.ENVIRONMENT}")
                     }
+
                     env.TF_ROOT = "terraform/environments/${params.ENVIRONMENT}"
                 }
+
                 sh '''#!/usr/bin/env bash
                     set -Eeuo pipefail
+
                     {
+                        echo "Checking Terraform project..."
+
                         test -d "$TF_ROOT"
+
+                        echo "Checking installed tools..."
+
                         command -v terraform
                         command -v aws
                         command -v python3
+
                         terraform version
                         aws --version
+
+                        echo "Checking AWS identity..."
+
                         aws sts get-caller-identity
+
+                        echo "Tool and AWS validation completed."
+
                     } 2>&1 | tee -a "$WORKSPACE/pipeline.log"
                 '''
             }
         }
 
+        // ------------------------------------------------
+        // 3. TERRAFORM FORMAT, INIT AND VALIDATE
+        // ------------------------------------------------
         stage('Terraform fmt, init and validate') {
             steps {
                 dir("${TF_ROOT}") {
+
                     sh '''#!/usr/bin/env bash
                         set -Eeuo pipefail
+
                         {
-                            terraform fmt -check -recursive ../../..
+                            echo "Checking Terraform formatting..."
+
+                            terraform fmt -check -recursive "$WORKSPACE/terraform"
+
+                            echo "Initializing Terraform..."
+
                             terraform init -input=false
+
+                            echo "Validating Terraform configuration..."
+
                             terraform validate
+
+                            echo "Terraform validation completed."
+
                         } 2>&1 | tee -a "$WORKSPACE/pipeline.log"
                     '''
                 }
             }
         }
 
+        // ------------------------------------------------
+        // 4. TERRAFORM PLAN
+        // ------------------------------------------------
         stage('Terraform plan') {
             steps {
                 dir("${TF_ROOT}") {
+
                     sh '''#!/usr/bin/env bash
                         set -Eeuo pipefail
                         set +x
+
+                        echo "Retrieving database password from AWS Secrets Manager..."
+
                         export DB_SECRET_JSON_KEY="techverito/${ENVIRONMENT}/db-password"
 
                         DB_PASSWORD="$(
@@ -90,25 +151,32 @@ pipeline {
                                 --secret-id "$DB_SECRET_ID" \
                                 --region "$AWS_SECRETS_REGION" \
                                 --query SecretString \
-                                --output text 2>> "$WORKSPACE/pipeline.log" |
+                                --output text \
+                                2>> "$WORKSPACE/pipeline.log" |
                             python3 -c '
 import json, os, sys
+
 secret = json.load(sys.stdin)
 key = os.environ["DB_SECRET_JSON_KEY"]
 value = secret.get(key)
+
 if not isinstance(value, str) or not value:
-    raise SystemExit("Database password key is missing or empty in Secrets Manager.")
+    raise SystemExit("Database password key is missing or empty.")
+
 print(value)
 '
                         )"
 
                         if [[ -z "$DB_PASSWORD" ]]; then
-                            echo "Database password retrieval returned an empty value." | tee -a "$WORKSPACE/pipeline.log"
+                            echo "Database password retrieval failed."
                             exit 1
                         fi
 
                         export TF_VAR_db_password="$DB_PASSWORD"
+
                         unset DB_PASSWORD
+
+                        echo "Generating Terraform plan..."
 
                         terraform plan \
                             -input=false \
@@ -116,19 +184,32 @@ print(value)
                             -out=tfplan \
                             2>&1 | tee -a "$WORKSPACE/pipeline.log"
 
+                        chmod 600 tfplan
+
                         unset TF_VAR_db_password
+
+                        echo "Terraform plan generated successfully."
                     '''
                 }
             }
         }
 
+        // ------------------------------------------------
+        // 5. PRODUCTION APPROVAL
+        // ------------------------------------------------
         stage('Approve production apply') {
             when {
                 allOf {
-                    expression { params.ACTION == 'apply' }
-                    expression { params.ENVIRONMENT == 'prod' }
+                    expression {
+                        params.ACTION == 'apply'
+                    }
+
+                    expression {
+                        params.ENVIRONMENT == 'prod'
+                    }
                 }
             }
+
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
                     input(
@@ -139,42 +220,28 @@ print(value)
             }
         }
 
-        stage('Apply') {
+        // ------------------------------------------------
+        // 6. TERRAFORM APPLY
+        // ------------------------------------------------
+        stage('Terraform apply') {
             when {
-                expression { params.ACTION == 'apply' }
+                expression {
+                    params.ACTION == 'apply'
+                }
             }
+
             steps {
                 dir("${TF_ROOT}") {
+
                     sh '''#!/usr/bin/env bash
                         set -Eeuo pipefail
                         set +x
+
+                        echo "Checking generated Terraform plan..."
+
                         test -f tfplan
-                        export DB_SECRET_JSON_KEY="techverito/${ENVIRONMENT}/db-password"
 
-                        DB_PASSWORD="$(
-                            aws secretsmanager get-secret-value \
-                                --secret-id "$DB_SECRET_ID" \
-                                --region "$AWS_SECRETS_REGION" \
-                                --query SecretString \
-                                --output text 2>> "$WORKSPACE/pipeline.log" |
-                            python3 -c '
-import json, os, sys
-secret = json.load(sys.stdin)
-key = os.environ["DB_SECRET_JSON_KEY"]
-value = secret.get(key)
-if not isinstance(value, str) or not value:
-    raise SystemExit("Database password key is missing or empty in Secrets Manager.")
-print(value)
-'
-                        )"
-
-                        if [[ -z "$DB_PASSWORD" ]]; then
-                            echo "Database password retrieval returned an empty value." | tee -a "$WORKSPACE/pipeline.log"
-                            exit 1
-                        fi
-
-                        export TF_VAR_db_password="$DB_PASSWORD"
-                        unset DB_PASSWORD
+                        echo "Applying saved Terraform plan..."
 
                         terraform apply \
                             -input=false \
@@ -182,24 +249,35 @@ print(value)
                             tfplan \
                             2>&1 | tee -a "$WORKSPACE/pipeline.log"
 
-                        unset TF_VAR_db_password
+                        echo "Terraform apply completed successfully."
                     '''
                 }
             }
         }
     }
 
+    // ------------------------------------------------
+    // POST BUILD ACTIONS
+    // ------------------------------------------------
     post {
+
+        // --------------------------------------------
+        // FAILURE: GEMINI AI ANALYSIS
+        // --------------------------------------------
         failure {
             script {
+
                 echo 'Pipeline failed. Starting Gemini failure analysis.'
 
-                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                catchError(
+                    buildResult: 'FAILURE',
+                    stageResult: 'FAILURE'
+                ) {
+
                     sh '''#!/usr/bin/env bash
                         set -Eeuo pipefail
                         set +x
 
-                        mkdir -p "$WORKSPACE"
                         touch "$WORKSPACE/pipeline.log"
 
                         echo "Starting Gemini analysis for ${JOB_NAME} #${BUILD_NUMBER}" \
@@ -210,30 +288,44 @@ print(value)
                                 --secret-id "$GEMINI_SECRET_ID" \
                                 --region "$AWS_SECRETS_REGION" \
                                 --query SecretString \
-                                --output text 2>> "$WORKSPACE/pipeline.log" |
+                                --output text \
+                                2>> "$WORKSPACE/pipeline.log" |
                             python3 -c '
 import json, os, sys
+
 secret = json.load(sys.stdin)
 key = os.environ["GEMINI_SECRET_JSON_KEY"]
 value = secret.get(key)
+
 if not isinstance(value, str) or not value:
-    raise SystemExit("Gemini API key is missing or empty in Secrets Manager.")
+    raise SystemExit("Gemini API key is missing or empty.")
+
 print(value)
 '
                         )"
 
-                        export GEMINI_MODEL_ID JOB_NAME BUILD_NUMBER ENVIRONMENT ACTION
+                        if [[ -z "$GEMINI_API_KEY" ]]; then
+                            echo "Gemini API key retrieval failed."
+                            exit 1
+                        fi
+
+                        export GEMINI_MODEL_ID
+                        export JOB_NAME
+                        export BUILD_NUMBER
+                        export ENVIRONMENT
+                        export ACTION
 
                         python3 scripts/ai_failure_analyzer.py \
                             2>&1 | tee -a "$WORKSPACE/pipeline.log"
 
                         unset GEMINI_API_KEY
+
+                        echo "Gemini analysis completed."
                     '''
 
-                    // Print the complete Gemini report in Jenkins Console Output.
                     echo "========== GEMINI AI FAILURE REPORT =========="
 
-                    sh '''
+                    sh '''#!/usr/bin/env bash
                         if [ -f AI_FAILURE_REPORT.md ]; then
                             cat AI_FAILURE_REPORT.md
                         else
@@ -243,30 +335,39 @@ print(value)
 
                     echo "========== END OF GEMINI AI REPORT =========="
                 }
-
-                // Archive report and logs even if Gemini analysis fails.
-                archiveArtifacts(
-                    artifacts: 'AI_FAILURE_REPORT.md,pipeline.log',
-                    allowEmptyArchive: true,
-                    fingerprint: true
-                )
             }
         }
 
+        // --------------------------------------------
+        // SUCCESS
+        // --------------------------------------------
         success {
-            echo "Terraform ${params.ACTION} completed for ${params.ENVIRONMENT}."
+            echo "Terraform ${params.ACTION} completed successfully for ${params.ENVIRONMENT}."
         }
 
+        // --------------------------------------------
+        // ALWAYS
+        // --------------------------------------------
         always {
+
+            archiveArtifacts(
+                artifacts: 'AI_FAILURE_REPORT.md,pipeline.log',
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
+
             script {
-                if (env.TF_ROOT) {
-                    dir("${env.TF_ROOT}") {
-                        sh 'rm -f tfplan || true'
-                    }
-                }
+                sh '''#!/usr/bin/env bash
+                    if [ -n "${TF_ROOT:-}" ]; then
+                        rm -f "$WORKSPACE/$TF_ROOT/tfplan" || true
+                    fi
+                '''
             }
         }
 
+        // --------------------------------------------
+        // CLEANUP
+        // --------------------------------------------
         cleanup {
             deleteDir()
         }
