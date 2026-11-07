@@ -1,3 +1,4 @@
+```groovy
 pipeline {
     agent any
 
@@ -55,7 +56,6 @@ pipeline {
                         command -v python3
                         terraform version
                         aws --version
-                        # AWS credentials come from the EC2 instance profile role.
                         aws sts get-caller-identity
                     } 2>&1 | tee -a "$WORKSPACE/pipeline.log"
                 '''
@@ -194,8 +194,6 @@ print(value)
             script {
                 echo 'Pipeline failed. Starting Gemini failure analysis.'
 
-                // Keep the original build failed, but do not let a Gemini/API
-                // problem prevent the log and any generated report being archived.
                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
                     sh '''#!/usr/bin/env bash
                         set -Eeuo pipefail
@@ -203,6 +201,7 @@ print(value)
 
                         mkdir -p "$WORKSPACE"
                         touch "$WORKSPACE/pipeline.log"
+
                         echo "Starting Gemini analysis for ${JOB_NAME} #${BUILD_NUMBER}" \
                             | tee -a "$WORKSPACE/pipeline.log"
 
@@ -230,10 +229,22 @@ print(value)
 
                         unset GEMINI_API_KEY
                     '''
+
+                    // Print the complete Gemini report in Jenkins Console Output.
+                    echo "========== GEMINI AI FAILURE REPORT =========="
+
+                    sh '''
+                        if [ -f AI_FAILURE_REPORT.md ]; then
+                            cat AI_FAILURE_REPORT.md
+                        else
+                            echo "AI_FAILURE_REPORT.md was not generated."
+                        fi
+                    '''
+
+                    echo "========== END OF GEMINI AI REPORT =========="
                 }
 
-                // IMPORTANT: archive outside catchError. This runs even when
-                // retrieving the Gemini secret or calling Gemini fails.
+                // Archive report and logs even if Gemini analysis fails.
                 archiveArtifacts(
                     artifacts: 'AI_FAILURE_REPORT.md,pipeline.log',
                     allowEmptyArchive: true,
@@ -257,8 +268,8 @@ print(value)
         }
 
         cleanup {
-            // Runs after the other post conditions, including artifact archiving.
             deleteDir()
         }
     }
 }
+```
