@@ -1,4 +1,4 @@
-
+```groovy
 pipeline {
     agent any
 
@@ -19,7 +19,7 @@ pipeline {
         choice(
             name: 'ACTION',
             choices: ['plan', 'apply'],
-            description: 'Run Terraform plan or apply the generated plan'
+            description: 'Run Terraform plan or apply'
         )
     }
 
@@ -34,13 +34,15 @@ pipeline {
 
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
+
+        TF_CHECKS_PASSED = 'false'
     }
 
     stages {
 
-        // ------------------------------------------------
+        // ---------------------------------------------
         // 1. CHECKOUT
-        // ------------------------------------------------
+        // ---------------------------------------------
         stage('Checkout') {
             steps {
                 checkout scm
@@ -50,18 +52,21 @@ pipeline {
 
                     : > "$WORKSPACE/pipeline.log"
 
-                    echo "Build started: ${JOB_NAME} #${BUILD_NUMBER}" \
+                    echo "Build: ${JOB_NAME} #${BUILD_NUMBER}" \
                         | tee -a "$WORKSPACE/pipeline.log"
 
-                    echo "Environment: ${ENVIRONMENT}; Action: ${ACTION}" \
+                    echo "Environment: ${ENVIRONMENT}" \
+                        | tee -a "$WORKSPACE/pipeline.log"
+
+                    echo "Action: ${ACTION}" \
                         | tee -a "$WORKSPACE/pipeline.log"
                 '''
             }
         }
 
-        // ------------------------------------------------
-        // 2. VALIDATE INPUTS AND TOOLS
-        // ------------------------------------------------
+        // ---------------------------------------------
+        // 2. VALIDATE TOOLS AND AWS ROLE
+        // ---------------------------------------------
         stage('Validate inputs, tools and AWS role') {
             steps {
                 script {
@@ -69,71 +74,125 @@ pipeline {
                         error("Unsupported environment: ${params.ENVIRONMENT}")
                     }
 
-                    env.TF_ROOT = "terraform/environments/${params.ENVIRONMENT}"
+                    env.TF_ROOT =
+                        "terraform/environments/${params.ENVIRONMENT}"
                 }
 
                 sh '''#!/usr/bin/env bash
                     set -Eeuo pipefail
 
                     {
-                        echo "Checking Terraform project..."
-
                         test -d "$TF_ROOT"
 
-                        echo "Checking installed tools..."
-
+                        echo "Checking Terraform..."
                         command -v terraform
-                        command -v aws
-                        command -v python3
-
                         terraform version
+
+                        echo "Checking AWS CLI..."
+                        command -v aws
                         aws --version
 
+                        echo "Checking Python..."
+                        command -v python3
+                        python3 --version
+
                         echo "Checking AWS identity..."
-
                         aws sts get-caller-identity
-
-                        echo "Tool and AWS validation completed."
 
                     } 2>&1 | tee -a "$WORKSPACE/pipeline.log"
                 '''
             }
         }
 
-        // ------------------------------------------------
-        // 3. TERRAFORM FORMAT, INIT AND VALIDATE
-        // ------------------------------------------------
+        // ---------------------------------------------
+        // 3. TERRAFORM FMT, INIT AND VALIDATE
+        // ALLOW FAILURE AND CONTINUE
+        // ---------------------------------------------
         stage('Terraform fmt, init and validate') {
             steps {
                 dir("${TF_ROOT}") {
+                    script {
 
-                    sh '''#!/usr/bin/env bash
-                        set -Eeuo pipefail
+                        def checkStatus = sh(
+                            returnStatus: true,
+                            script: '''#!/usr/bin/env bash
+                                set -uo pipefail
 
-                        {
-                            echo "Checking Terraform formatting..."
+                                STATUS=0
 
-                            terraform fmt -check -recursive "$WORKSPACE/terraform"
+                                echo "========== TERRAFORM FMT =========="
 
-                            echo "Initializing Terraform..."
+                                terraform fmt -check -recursive \
+                                    "$WORKSPACE/terraform" \
+                                    2>&1 | tee -a "$WORKSPACE/pipeline.log"
 
-                            terraform init -input=false
+                                FMT_STATUS=${PIPESTATUS[0]}
 
-                            echo "Validating Terraform configuration..."
+                                if [[ $FMT_STATUS -ne 0 ]]; then
+                                    echo "WARNING: Terraform fmt failed."
+                                    STATUS=1
+                                fi
 
-                            terraform validate
+                                echo "========== TERRAFORM INIT =========="
 
-                            echo "Terraform validation completed."
+                                terraform init -input=false \
+                                    2>&1 | tee -a "$WORKSPACE/pipeline.log"
 
-                        } 2>&1 | tee -a "$WORKSPACE/pipeline.log"
-                    '''
+                                INIT_STATUS=${PIPESTATUS[0]}
+
+                                if [[ $INIT_STATUS -ne 0 ]]; then
+                                    echo "WARNING: Terraform init failed."
+                                    STATUS=1
+                                fi
+
+                                echo "========== TERRAFORM VALIDATE =========="
+
+                                terraform validate \
+                                    2>&1 | tee -a "$WORKSPACE/pipeline.log"
+
+                                VALIDATE_STATUS=${PIPESTATUS[0]}
+
+                                if [[ $VALIDATE_STATUS -ne 0 ]]; then
+                                    echo "WARNING: Terraform validate failed."
+                                    STATUS=1
+                                fi
+
+                                echo "========== CHECK SUMMARY =========="
+
+                                echo "FMT status: $FMT_STATUS"
+                                echo "INIT status: $INIT_STATUS"
+                                echo "VALIDATE status: $VALIDATE_STATUS"
+
+                                exit $STATUS
+                            '''
+                        )
+
+                        if (checkStatus != 0) {
+
+                            env.TF_CHECKS_PASSED = 'false'
+
+                            catchError(
+                                buildResult: 'UNSTABLE',
+                                stageResult: 'UNSTABLE',
+                                message: 'Terraform checks failed. Continuing pipeline, but apply will be skipped.'
+                            ) {
+                                error('Terraform fmt/init/validate checks failed.')
+                            }
+
+                        } else {
+
+                            env.TF_CHECKS_PASSED = 'true'
+
+                            echo 'All Terraform checks passed.'
+                        }
+                    }
                 }
             }
         }
 
-        // ------------------------------------------------
+        // ---------------------------------------------
         // 4. TERRAFORM PLAN
-        // ------------------------------------------------
+        // ---------------------------------------------
         stage('Terraform plan') {
             steps {
                 dir("${TF_ROOT}") {
@@ -142,7 +201,7 @@ pipeline {
                         set -Eeuo pipefail
                         set +x
 
-                        echo "Retrieving database password from AWS Secrets Manager..."
+                        echo "Retrieving database password..."
 
                         export DB_SECRET_JSON_KEY="techverito/${ENVIRONMENT}/db-password"
 
@@ -161,7 +220,7 @@ key = os.environ["DB_SECRET_JSON_KEY"]
 value = secret.get(key)
 
 if not isinstance(value, str) or not value:
-    raise SystemExit("Database password key is missing or empty.")
+    raise SystemExit("Database password is missing or empty.")
 
 print(value)
 '
@@ -173,7 +232,6 @@ print(value)
                         fi
 
                         export TF_VAR_db_password="$DB_PASSWORD"
-
                         unset DB_PASSWORD
 
                         echo "Generating Terraform plan..."
@@ -188,15 +246,15 @@ print(value)
 
                         unset TF_VAR_db_password
 
-                        echo "Terraform plan generated successfully."
+                        echo "Terraform plan completed."
                     '''
                 }
             }
         }
 
-        // ------------------------------------------------
+        // ---------------------------------------------
         // 5. PRODUCTION APPROVAL
-        // ------------------------------------------------
+        // ---------------------------------------------
         stage('Approve production apply') {
             when {
                 allOf {
@@ -207,26 +265,37 @@ print(value)
                     expression {
                         params.ENVIRONMENT == 'prod'
                     }
+
+                    expression {
+                        env.TF_CHECKS_PASSED == 'true'
+                    }
                 }
             }
 
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
                     input(
-                        message: 'Approve applying the reviewed Terraform plan to PRODUCTION?',
+                        message: 'Approve applying the Terraform plan to PRODUCTION?',
                         ok: 'Approve production apply'
                     )
                 }
             }
         }
 
-        // ------------------------------------------------
+        // ---------------------------------------------
         // 6. TERRAFORM APPLY
-        // ------------------------------------------------
+        // SKIP IF CHECKS FAILED
+        // ---------------------------------------------
         stage('Terraform apply') {
             when {
-                expression {
-                    params.ACTION == 'apply'
+                allOf {
+                    expression {
+                        params.ACTION == 'apply'
+                    }
+
+                    expression {
+                        env.TF_CHECKS_PASSED == 'true'
+                    }
                 }
             }
 
@@ -237,7 +306,7 @@ print(value)
                         set -Eeuo pipefail
                         set +x
 
-                        echo "Checking generated Terraform plan..."
+                        echo "Checking Terraform plan..."
 
                         test -f tfplan
 
@@ -256,22 +325,22 @@ print(value)
         }
     }
 
-    // ------------------------------------------------
+    // ---------------------------------------------
     // POST BUILD ACTIONS
-    // ------------------------------------------------
+    // ---------------------------------------------
     post {
 
-        // --------------------------------------------
-        // FAILURE: GEMINI AI ANALYSIS
-        // --------------------------------------------
-        failure {
+        // -----------------------------------------
+        // FAILURE OR UNSTABLE: GEMINI ANALYSIS
+        // -----------------------------------------
+        unsuccessful {
             script {
 
-                echo 'Pipeline failed. Starting Gemini failure analysis.'
+                echo 'Pipeline unsuccessful. Starting Gemini analysis.'
 
                 catchError(
-                    buildResult: 'FAILURE',
-                    stageResult: 'FAILURE'
+                    buildResult: 'UNSTABLE',
+                    stageResult: 'UNSTABLE'
                 ) {
 
                     sh '''#!/usr/bin/env bash
@@ -280,7 +349,7 @@ print(value)
 
                         touch "$WORKSPACE/pipeline.log"
 
-                        echo "Starting Gemini analysis for ${JOB_NAME} #${BUILD_NUMBER}" \
+                        echo "Starting Gemini analysis..." \
                             | tee -a "$WORKSPACE/pipeline.log"
 
                         export GEMINI_API_KEY="$(
@@ -338,16 +407,16 @@ print(value)
             }
         }
 
-        // --------------------------------------------
+        // -----------------------------------------
         // SUCCESS
-        // --------------------------------------------
+        // -----------------------------------------
         success {
             echo "Terraform ${params.ACTION} completed successfully for ${params.ENVIRONMENT}."
         }
 
-        // --------------------------------------------
+        // -----------------------------------------
         // ALWAYS
-        // --------------------------------------------
+        // -----------------------------------------
         always {
 
             archiveArtifacts(
@@ -357,19 +426,20 @@ print(value)
             )
 
             script {
-                sh '''#!/usr/bin/env bash
-                    if [ -n "${TF_ROOT:-}" ]; then
-                        rm -f "$WORKSPACE/$TF_ROOT/tfplan" || true
-                    fi
-                '''
+                if (env.TF_ROOT) {
+                    dir("${env.TF_ROOT}") {
+                        sh 'rm -f tfplan || true'
+                    }
+                }
             }
         }
 
-        // --------------------------------------------
+        // -----------------------------------------
         // CLEANUP
-        // --------------------------------------------
+        // -----------------------------------------
         cleanup {
             deleteDir()
         }
     }
 }
+```
