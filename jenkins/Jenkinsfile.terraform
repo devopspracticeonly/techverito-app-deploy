@@ -77,7 +77,7 @@ pipeline {
                             break
 
                         default:
-                            // Feature, bugfix, hotfix and all other branches are plan-only.
+                            // Only dev, test and main deploy. Other branches run plan only.
                             env.TF_ENVIRONMENT = 'dev'
                             env.TF_ACTION = 'plan'
                             break
@@ -290,28 +290,27 @@ print(value)
         // ---------------------------------------------
         // 6. PRODUCTION APPROVAL
         // ---------------------------------------------
-        stage('Approve production apply') {
+        stage('Approve Terraform apply') {
             when {
-                allOf {
-                    expression {
-                        env.TF_ACTION == 'apply'
-                    }
+                expression {
+                    def shouldApply =
+                        env.TF_ACTION?.trim() == 'apply' &&
+                        env.TF_CHECKS_PASSED?.trim() == 'true'
 
-                    expression {
-                        env.TF_ENVIRONMENT == 'prod'
-                    }
+                    echo "Approval check - branch: ${env.BRANCH_NAME}"
+                    echo "Approval check - environment: ${env.TF_ENVIRONMENT}"
+                    echo "Approval check - action: ${env.TF_ACTION}"
+                    echo "Approval check - Terraform checks passed: ${env.TF_CHECKS_PASSED}"
 
-                    expression {
-                        env.TF_CHECKS_PASSED == 'true'
-                    }
+                    return shouldApply
                 }
             }
 
             steps {
-                timeout(time: 15, unit: 'MINUTES') {
+                timeout(time: 30, unit: 'MINUTES') {
                     input(
-                        message: 'Approve applying the Terraform plan to PRODUCTION?',
-                        ok: 'Approve production apply'
+                        message: "Approve Terraform apply for ${env.TF_ENVIRONMENT.toUpperCase()} environment (branch: ${env.BRANCH_NAME})?",
+                        ok: 'Approve Terraform apply'
                     )
                 }
             }
@@ -323,14 +322,17 @@ print(value)
         // ---------------------------------------------
         stage('Terraform apply') {
             when {
-                allOf {
-                    expression {
-                        env.TF_ACTION == 'apply'
-                    }
+                expression {
+                    def shouldApply =
+                        env.TF_ACTION?.trim() == 'apply' &&
+                        env.TF_CHECKS_PASSED?.trim() == 'true'
 
-                    expression {
-                        env.TF_CHECKS_PASSED == 'true'
-                    }
+                    echo "Apply check - branch: ${env.BRANCH_NAME}"
+                    echo "Apply check - environment: ${env.TF_ENVIRONMENT}"
+                    echo "Apply check - action: ${env.TF_ACTION}"
+                    echo "Apply check - Terraform checks passed: ${env.TF_CHECKS_PASSED}"
+
+                    return shouldApply
                 }
             }
 
@@ -446,7 +448,16 @@ print(value)
         // SUCCESS
         // -----------------------------------------
         success {
-            echo "Terraform ${env.TF_ACTION} completed successfully for ${env.TF_ENVIRONMENT}."
+            script {
+                if (env.TF_ACTION?.trim() == 'apply' &&
+                    env.TF_CHECKS_PASSED?.trim() == 'true') {
+                    echo "Pipeline completed successfully. Terraform apply finished for ${env.TF_ENVIRONMENT}."
+                } else if (env.TF_CHECKS_PASSED?.trim() != 'true') {
+                    echo "Pipeline completed, but Terraform apply was skipped because fmt/init/validate checks did not pass."
+                } else {
+                    echo "Terraform plan completed successfully for ${env.TF_ENVIRONMENT}. No apply was requested for this branch."
+                }
+            }
         }
 
         // -----------------------------------------
