@@ -40,7 +40,7 @@ variable "max_allocated_storage" {
 }
 variable "engine_version" {
   type    = string
-  default = "16.3"
+  default = "18.3-R2"
 }
 variable "multi_az" {
   type    = bool
