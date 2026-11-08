@@ -21,10 +21,7 @@ pipeline {
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
 
-        // These values are assigned dynamically from BRANCH_NAME.
-        TF_ENVIRONMENT = ''
-        TF_ACTION = ''
-        TF_ROOT = ''
+        // TF_ENVIRONMENT, TF_ACTION and TF_ROOT are set in the branch-mapping stage.
 
         TF_CHECKS_PASSED = 'false'
     }
