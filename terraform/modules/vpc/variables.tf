@@ -2,7 +2,7 @@ variable "name" {
   type = string
 }
 variable "vpc_cidr" {
-  type = string
+  type    = string
   default = "10.20.0.0/16"
 }
 variable "availability_zones" {
@@ -15,10 +15,10 @@ variable "private_subnets" {
   type = list(string)
 }
 variable "nat_gateway_count" {
-  type = number
+  type    = number
   default = 1
 }
 variable "tags" {
-  type = map(string)
+  type    = map(string)
   default = {}
 }

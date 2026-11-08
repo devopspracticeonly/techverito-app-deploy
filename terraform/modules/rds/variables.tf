@@ -11,54 +11,54 @@ variable "private_subnet_ids" {
   type = list(string)
 }
 variable "allowed_client_cidrs" {
-  type = list(string)
+  type    = list(string)
   default = []
 }
 variable "db_name" {
-  type = string
+  type    = string
   default = "employees"
 }
 variable "db_username" {
-  type = string
+  type    = string
   default = "employee_admin"
 }
 variable "db_password" {
-  type = string
+  type      = string
   sensitive = true
 }
 variable "db_instance_class" {
-  type = string
+  type    = string
   default = "db.t3.micro"
 }
 variable "allocated_storage" {
-  type = number
+  type    = number
   default = 20
 }
 variable "max_allocated_storage" {
-  type = number
+  type    = number
   default = 100
 }
 variable "engine_version" {
-  type = string
+  type    = string
   default = "16.3"
 }
 variable "multi_az" {
-  type = bool
+  type    = bool
   default = false
 }
 variable "backup_retention_period" {
-  type = number
+  type    = number
   default = 7
 }
 variable "deletion_protection" {
-  type = bool
+  type    = bool
   default = false
 }
 variable "skip_final_snapshot" {
-  type = bool
+  type    = bool
   default = true
 }
 variable "tags" {
-  type = map(string)
+  type    = map(string)
   default = {}
 }

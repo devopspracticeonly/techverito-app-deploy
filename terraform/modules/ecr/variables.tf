@@ -1,20 +1,20 @@
 variable "backend_repository" {
-  type = string
+  type    = string
   default = "employee-backend"
 }
 variable "frontend_repository" {
-  type = string
+  type    = string
   default = "employee-frontend"
 }
 variable "image_tag_mutability" {
-  type = string
+  type    = string
   default = "IMMUTABLE"
 }
 variable "keep_image_count" {
-  type = number
+  type    = number
   default = 30
 }
 variable "tags" {
-  type = map(string)
+  type    = map(string)
   default = {}
 }
