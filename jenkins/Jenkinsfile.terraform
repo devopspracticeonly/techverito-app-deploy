@@ -23,7 +23,6 @@ pipeline {
 
         // TF_ENVIRONMENT, TF_ACTION and TF_ROOT are set in the branch-mapping stage.
 
-        TF_CHECKS_PASSED = 'false'
     }
 
     stages {
@@ -54,6 +53,10 @@ pipeline {
         stage('Set deployment environment') {
             steps {
                 script {
+                    // Initialize imperatively so later stages can update this value.
+                    // Keep TF_CHECKS_PASSED out of the top-level environment block.
+                    env.TF_CHECKS_PASSED = 'false'
+
                     def branch = env.BRANCH_NAME?.trim()
 
                     if (!branch) {
@@ -92,6 +95,7 @@ pipeline {
                     echo "Terraform environment: ${env.TF_ENVIRONMENT}"
                     echo "Pipeline action: ${env.TF_ACTION}"
                     echo "Terraform root: ${env.TF_ROOT}"
+                    echo "Initial Terraform checks status: ${env.TF_CHECKS_PASSED}"
                 }
             }
         }
@@ -218,7 +222,7 @@ pipeline {
 
                             env.TF_CHECKS_PASSED = 'true'
 
-                            echo 'All Terraform checks passed.'
+                            echo "All Terraform checks passed. TF_CHECKS_PASSED=${env.TF_CHECKS_PASSED}"
                         }
                     }
                 }
