@@ -4,7 +4,6 @@ terraform {
     key            = "test/terraform.tfstate"
     region         = "us-east-1"
     encrypt        = true
-	use_lockfile = true
-    dynamodb_table = "techverito-terraform-locks-test"
+	use_lockfile   = true
   }
 }
