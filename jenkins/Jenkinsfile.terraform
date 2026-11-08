@@ -21,10 +21,7 @@ pipeline {
         TF_IN_AUTOMATION = 'true'
         TF_INPUT = 'false'
 
-        // These values are assigned dynamically from BRANCH_NAME.
-        ENVIRONMENT = ''
-        ACTION = ''
-        TF_ROOT = ''
+        // TF_ENVIRONMENT, TF_ACTION and TF_ROOT are set in the branch-mapping stage.
 
         TF_CHECKS_PASSED = 'false'
     }
@@ -52,12 +49,12 @@ pipeline {
 
 
         // ---------------------------------------------
-        // 2. SELECT ENVIRONMENT AND ACTION FROM BRANCH
+        // 2. SELECT TF_ENVIRONMENT AND TF_ACTION FROM BRANCH
         // ---------------------------------------------
         stage('Set deployment environment') {
             steps {
                 script {
-                    def branch = env.BRANCH_NAME
+                    def branch = env.BRANCH_NAME?.trim()
 
                     if (!branch) {
                         error('BRANCH_NAME is not available. Run this pipeline as a Jenkins Multibranch Pipeline.')
@@ -65,35 +62,35 @@ pipeline {
 
                     switch (branch) {
                         case 'dev':
-                            env.ENVIRONMENT = 'dev'
-                            env.ACTION = 'apply'
+                            env.TF_ENVIRONMENT = 'dev'
+                            env.TF_ACTION = 'apply'
                             break
 
                         case 'test':
-                            env.ENVIRONMENT = 'test'
-                            env.ACTION = 'apply'
+                            env.TF_ENVIRONMENT = 'test'
+                            env.TF_ACTION = 'apply'
                             break
 
                         case 'main':
-                            env.ENVIRONMENT = 'prod'
-                            env.ACTION = 'apply'
+                            env.TF_ENVIRONMENT = 'prod'
+                            env.TF_ACTION = 'apply'
                             break
 
                         default:
                             // Feature, bugfix, hotfix and all other branches are plan-only.
-                            env.ENVIRONMENT = 'dev'
-                            env.ACTION = 'plan'
+                            env.TF_ENVIRONMENT = 'dev'
+                            env.TF_ACTION = 'plan'
                             break
                     }
 
-                    env.TF_ROOT = "terraform/environments/${env.ENVIRONMENT}"
+                    env.TF_ROOT = "terraform/environments/${env.TF_ENVIRONMENT}"
 
-                    currentBuild.description = "Branch: ${branch} | Environment: ${env.ENVIRONMENT} | Action: ${env.ACTION}"
+                    currentBuild.description = "Branch: ${branch} | Environment: ${env.TF_ENVIRONMENT} | Action: ${env.TF_ACTION}"
 
                     echo '========== BRANCH DEPLOYMENT CONFIGURATION =========='
                     echo "Git branch: ${branch}"
-                    echo "Terraform environment: ${env.ENVIRONMENT}"
-                    echo "Pipeline action: ${env.ACTION}"
+                    echo "Terraform environment: ${env.TF_ENVIRONMENT}"
+                    echo "Pipeline action: ${env.TF_ACTION}"
                     echo "Terraform root: ${env.TF_ROOT}"
                 }
             }
@@ -105,15 +102,15 @@ pipeline {
         stage('Validate inputs, tools and AWS role') {
             steps {
                 script {
-                    if (!(env.ENVIRONMENT in ['dev', 'test', 'prod'])) {
-                        error("Unsupported environment selected from branch: ${env.ENVIRONMENT}")
+                    if (!(env.TF_ENVIRONMENT in ['dev', 'test', 'prod'])) {
+                        error("Unsupported environment selected from branch: ${env.TF_ENVIRONMENT}")
                     }
 
-                    if (!(env.ACTION in ['plan', 'apply'])) {
-                        error("Unsupported pipeline action selected from branch: ${env.ACTION}")
+                    if (!(env.TF_ACTION in ['plan', 'apply'])) {
+                        error("Unsupported pipeline action selected from branch: ${env.TF_ACTION}")
                     }
 
-                    echo "Validated branch mapping: ${env.BRANCH_NAME} -> ${env.ENVIRONMENT} (${env.ACTION})"
+                    echo "Validated branch mapping: ${env.BRANCH_NAME} -> ${env.TF_ENVIRONMENT} (${env.TF_ACTION})"
                 }
 
                 sh '''#!/usr/bin/env bash
@@ -241,7 +238,7 @@ pipeline {
 
                         echo "Retrieving database password..."
 
-                        export DB_SECRET_JSON_KEY="techverito/${ENVIRONMENT}/db-password"
+                        export DB_SECRET_JSON_KEY="techverito/${TF_ENVIRONMENT}/db-password"
 
                         DB_PASSWORD="$(
                             aws secretsmanager get-secret-value \
@@ -297,11 +294,11 @@ print(value)
             when {
                 allOf {
                     expression {
-                        env.ACTION == 'apply'
+                        env.TF_ACTION == 'apply'
                     }
 
                     expression {
-                        env.ENVIRONMENT == 'prod'
+                        env.TF_ENVIRONMENT == 'prod'
                     }
 
                     expression {
@@ -328,7 +325,7 @@ print(value)
             when {
                 allOf {
                     expression {
-                        env.ACTION == 'apply'
+                        env.TF_ACTION == 'apply'
                     }
 
                     expression {
@@ -364,7 +361,7 @@ print(value)
     }
 
     // ---------------------------------------------
-    // POST BUILD ACTIONS
+    // POST BUILD TF_ACTIONS
     // ---------------------------------------------
     post {
 
@@ -419,8 +416,8 @@ print(value)
                         export GEMINI_MODEL_ID
                         export JOB_NAME
                         export BUILD_NUMBER
-                        export ENVIRONMENT
-                        export ACTION
+                        export TF_ENVIRONMENT
+                        export TF_ACTION
 
                         python3 scripts/ai_failure_analyzer.py \
                             2>&1 | tee -a "$WORKSPACE/pipeline.log"
@@ -449,7 +446,7 @@ print(value)
         // SUCCESS
         // -----------------------------------------
         success {
-            echo "Terraform ${env.ACTION} completed successfully for ${env.ENVIRONMENT}."
+            echo "Terraform ${env.TF_ACTION} completed successfully for ${env.TF_ENVIRONMENT}."
         }
 
         // -----------------------------------------
