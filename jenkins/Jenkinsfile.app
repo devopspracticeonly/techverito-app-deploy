@@ -29,124 +29,145 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                checkout scm
-                script {
-                    env.IMAGE_TAG = sh(
-                        script: 'git rev-parse --short=12 HEAD',
-                        returnStdout: true
-                    ).trim()
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    checkout scm
 
-                    env.REGISTRY =
-                        "${params.ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com"
+                    script {
+                        env.IMAGE_TAG = sh(
+                            script: 'git rev-parse --short=12 HEAD',
+                            returnStdout: true
+                        ).trim()
 
-                    env.FRONTEND_IMAGE =
-                        "${env.REGISTRY}/${env.FRONTEND_REPO}"
+                        env.REGISTRY =
+                            "${params.ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com"
 
-                    env.BACKEND_IMAGE =
-                        "${env.REGISTRY}/${env.BACKEND_REPO}"
+                        env.FRONTEND_IMAGE =
+                            "${env.REGISTRY}/${env.FRONTEND_REPO}"
 
-                    echo "Image tag: ${env.IMAGE_TAG}"
+                        env.BACKEND_IMAGE =
+                            "${env.REGISTRY}/${env.BACKEND_REPO}"
+
+                        echo "Image tag: ${env.IMAGE_TAG}"
+                    }
                 }
             }
         }
-		
-		stage('SonarQube Analysis') {
-    steps {
-        withSonarQubeEnv('SonarQube') {
-            sh '''
-                set -e
 
-                sonar-scanner \
-                  -Dsonar.projectKey=techverito-employee-management \
-                  -Dsonar.projectName="Techverito Employee Management" \
-                  -Dsonar.sources=frontend/src,backend \
-                  -Dsonar.exclusions="**/node_modules/**,**/build/**,**/vendor/**,**/*.test.js,**/*_test.go" \
-                  -Dsonar.sourceEncoding=UTF-8
-            '''
+        stage('SonarQube Analysis') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                            set -e
+
+                            sonar-scanner \
+                              -Dsonar.projectKey=techverito-employee-management \
+                              -Dsonar.projectName="Techverito Employee Management" \
+                              -Dsonar.sources=frontend/src,backend \
+                              -Dsonar.exclusions="**/node_modules/**,**/build/**,**/vendor/**,**/*.test.js,**/*_test.go" \
+                              -Dsonar.sourceEncoding=UTF-8
+                        '''
+                    }
+                }
+            }
         }
-    }
-}
 
         stage('Validate source files') {
             steps {
-                sh '''
-                    set -e
-                    test -f "$FRONTEND_DIR/Dockerfile"
-                    test -f "$FRONTEND_DIR/package.json"
-                    test -f "$BACKEND_DIR/Dockerfile"
-                    test -f "$BACKEND_DIR/go.mod"
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                        set -e
+                        test -f "$FRONTEND_DIR/Dockerfile"
+                        test -f "$FRONTEND_DIR/package.json"
+                        test -f "$BACKEND_DIR/Dockerfile"
+                        test -f "$BACKEND_DIR/go.mod"
 
-                    echo "Frontend and backend source files found."
-                '''
+                        echo "Frontend and backend source files found."
+                    '''
+                }
             }
         }
 
         stage('Build Frontend') {
             steps {
-                sh '''
-                    docker build \
-                      -t "$FRONTEND_IMAGE:$IMAGE_TAG" \
-                      "$FRONTEND_DIR"
-                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                        docker build \
+                          -t "$FRONTEND_IMAGE:$IMAGE_TAG" \
+                          "$FRONTEND_DIR"
+                    '''
+                }
             }
         }
 
         stage('Build Backend') {
             steps {
-                sh '''
-                    docker build \
-                      -t "$BACKEND_IMAGE:$IMAGE_TAG" \
-                      "$BACKEND_DIR"
-                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                        docker build \
+                          -t "$BACKEND_IMAGE:$IMAGE_TAG" \
+                          "$BACKEND_DIR"
+                    '''
+                }
             }
         }
 
         stage('Trivy Scan') {
             steps {
-                sh '''
-                    trivy image --exit-code 1 \
-                      --severity HIGH,CRITICAL \
-                      "$FRONTEND_IMAGE:$IMAGE_TAG"
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                        trivy image --exit-code 1 \
+                          --severity HIGH,CRITICAL \
+                          "$FRONTEND_IMAGE:$IMAGE_TAG"
 
-                    trivy image --exit-code 1 \
-                      --severity HIGH,CRITICAL \
-                      "$BACKEND_IMAGE:$IMAGE_TAG"
-                '''
+                        trivy image --exit-code 1 \
+                          --severity HIGH,CRITICAL \
+                          "$BACKEND_IMAGE:$IMAGE_TAG"
+                    '''
+                }
             }
         }
 
         stage('ECR Login') {
             steps {
-                sh '''
-                    aws ecr get-login-password \
-                      --region "$AWS_REGION" |
-                    docker login \
-                      --username AWS \
-                      --password-stdin "$REGISTRY"
-                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                        aws ecr get-login-password \
+                          --region "$AWS_REGION" |
+                        docker login \
+                          --username AWS \
+                          --password-stdin "$REGISTRY"
+                    '''
+                }
             }
         }
 
         stage('Push Frontend Image') {
             steps {
-                sh '''
-                    docker push "$FRONTEND_IMAGE:$IMAGE_TAG"
-                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                        docker push "$FRONTEND_IMAGE:$IMAGE_TAG"
+                    '''
+                }
             }
         }
 
         stage('Push Backend Image') {
             steps {
-                sh '''
-                    docker push "$BACKEND_IMAGE:$IMAGE_TAG"
-                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                        docker push "$BACKEND_IMAGE:$IMAGE_TAG"
+                    '''
+                }
             }
         }
 
         stage('Image Summary') {
             steps {
-                echo "Frontend: ${env.FRONTEND_IMAGE}:${env.IMAGE_TAG}"
-                echo "Backend:  ${env.BACKEND_IMAGE}:${env.IMAGE_TAG}"
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    echo "Frontend: ${env.FRONTEND_IMAGE}:${env.IMAGE_TAG}"
+                    echo "Backend:  ${env.BACKEND_IMAGE}:${env.IMAGE_TAG}"
+                }
             }
         }
     }
@@ -158,11 +179,11 @@ pipeline {
         }
 
         success {
-            echo 'Both application images were pushed to ECR.'
+            echo 'Pipeline completed. Check individual stages for failures.'
         }
 
         failure {
-            echo 'Application pipeline failed. Check the failed stage.'
+            echo 'Application pipeline failed.'
         }
     }
 }
