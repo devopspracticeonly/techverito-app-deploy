@@ -10,7 +10,7 @@ pipeline {
 
     parameters {
         string(name: 'AWS_REGION', defaultValue: 'ap-south-1')
-        string(name: 'ACCOUNT_ID', defaultValue: '736865445725')
+        string(name: 'ACCOUNT_ID', defaultValue: '028231499795')
         choice(name: 'ENVIRONMENT', choices: ['dev', 'test', 'prod'])
     }
 
