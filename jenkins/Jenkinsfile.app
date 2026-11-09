@@ -49,6 +49,23 @@ pipeline {
                 }
             }
         }
+		
+		stage('SonarQube Analysis') {
+    steps {
+        withSonarQubeEnv('SonarQube') {
+            sh '''
+                set -e
+
+                sonar-scanner \
+                  -Dsonar.projectKey=techverito-employee-management \
+                  -Dsonar.projectName="Techverito Employee Management" \
+                  -Dsonar.sources=frontend/src,backend \
+                  -Dsonar.exclusions="**/node_modules/**,**/build/**,**/vendor/**,**/*.test.js,**/*_test.go" \
+                  -Dsonar.sourceEncoding=UTF-8
+            '''
+        }
+    }
+}
 
         stage('Validate source files') {
             steps {

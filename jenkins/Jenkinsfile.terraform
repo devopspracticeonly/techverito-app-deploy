@@ -46,21 +46,6 @@ pipeline {
             }
         }
 
-        // ---------------------------------------------
-        // 1. SONARQUBE
-        // ---------------------------------------------
-		stage('SonarQube Analysis') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    withSonarQubeEnv('SonarQube') {
-                        sh '''
-                        mvn sonar:sonar \
-                        -Dsonar.projectKey=devops-handson-activities
-                        '''
-                    }
-                }
-            }
-        }
 
         // ---------------------------------------------
         // 2. SELECT TF_ENVIRONMENT AND TF_ACTION FROM BRANCH
