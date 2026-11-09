@@ -1,10 +1,7 @@
 pipeline {
     agent any
 
-    tools {
-        maven 'maven'
-    }
-
+   
 	parameters {
 		string(
 			name: 'AWS_REGION',
