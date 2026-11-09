@@ -15,24 +15,24 @@ pipeline {
     }
 
     environment {
-        AWS_DEFAULT_REGION = "${params.AWS_REGION}"
-        AWS_REGION = "${params.AWS_REGION}"
-
         FRONTEND_REPO = 'employee-frontend'
         BACKEND_REPO  = 'employee-backend'
 
         FRONTEND_DIR = 'frontend'
         BACKEND_DIR  = 'backend'
+
+        FRONTEND_DOCKERFILE = 'docker/frontend/Dockerfile'
+        BACKEND_DOCKERFILE  = 'docker/backend/Dockerfile'
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    checkout scm
+                script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        checkout scm
 
-                    script {
                         env.IMAGE_TAG = sh(
                             script: 'git rev-parse --short=12 HEAD',
                             returnStdout: true
@@ -47,7 +47,11 @@ pipeline {
                         env.BACKEND_IMAGE =
                             "${env.REGISTRY}/${env.BACKEND_REPO}"
 
-                        echo "Image tag: ${env.IMAGE_TAG}"
+                        env.CHECKOUT_READY = 'true'
+
+                        echo "Git commit: ${env.IMAGE_TAG}"
+                        echo "Environment: ${params.ENVIRONMENT}"
+                        echo "Registry: ${env.REGISTRY}"
                     }
                 }
             }
@@ -56,6 +60,12 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    script {
+                        if (env.CHECKOUT_READY != 'true') {
+                            error('Checkout failed. Skipping SonarQube analysis.')
+                        }
+                    }
+
                     withSonarQubeEnv('SonarQube') {
                         sh '''
                             set -e
@@ -72,17 +82,21 @@ pipeline {
             }
         }
 
-        stage('Validate source files') {
+        stage('Validate Source Files') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
                         set -e
-                        test -f "$FRONTEND_DIR/Dockerfile"
-                        test -f "$FRONTEND_DIR/package.json"
-                        test -f "$BACKEND_DIR/Dockerfile"
-                        test -f "$BACKEND_DIR/go.mod"
 
-                        echo "Frontend and backend source files found."
+                        test -f frontend/package.json
+                        test -f backend/go.mod
+                        test -f backend/go.sum
+                        test -f backend/main.go
+
+                        test -f docker/frontend/Dockerfile
+                        test -f docker/backend/Dockerfile
+
+                        echo "All source files and Dockerfiles found."
                     '''
                 }
             }
@@ -91,8 +105,17 @@ pipeline {
         stage('Build Frontend') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    script {
+                        if (env.CHECKOUT_READY != 'true') {
+                            error('Checkout failed. Cannot build frontend.')
+                        }
+                    }
+
                     sh '''
+                        set -e
+
                         docker build \
+                          -f "$FRONTEND_DOCKERFILE" \
                           -t "$FRONTEND_IMAGE:$IMAGE_TAG" \
                           "$FRONTEND_DIR"
                     '''
@@ -103,8 +126,17 @@ pipeline {
         stage('Build Backend') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    script {
+                        if (env.CHECKOUT_READY != 'true') {
+                            error('Checkout failed. Cannot build backend.')
+                        }
+                    }
+
                     sh '''
+                        set -e
+
                         docker build \
+                          -f "$BACKEND_DOCKERFILE" \
                           -t "$BACKEND_IMAGE:$IMAGE_TAG" \
                           "$BACKEND_DIR"
                     '''
@@ -116,6 +148,11 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
+                        set -e
+
+                        docker image inspect "$FRONTEND_IMAGE:$IMAGE_TAG"
+                        docker image inspect "$BACKEND_IMAGE:$IMAGE_TAG"
+
                         trivy image --exit-code 1 \
                           --severity HIGH,CRITICAL \
                           "$FRONTEND_IMAGE:$IMAGE_TAG"
@@ -132,6 +169,8 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
+                        set -e
+
                         aws ecr get-login-password \
                           --region "$AWS_REGION" |
                         docker login \
@@ -146,6 +185,10 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
+                        set -e
+
+                        docker image inspect "$FRONTEND_IMAGE:$IMAGE_TAG"
+
                         docker push "$FRONTEND_IMAGE:$IMAGE_TAG"
                     '''
                 }
@@ -156,6 +199,10 @@ pipeline {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
+                        set -e
+
+                        docker image inspect "$BACKEND_IMAGE:$IMAGE_TAG"
+
                         docker push "$BACKEND_IMAGE:$IMAGE_TAG"
                     '''
                 }
@@ -165,8 +212,9 @@ pipeline {
         stage('Image Summary') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    echo "Environment: ${params.ENVIRONMENT}"
                     echo "Frontend: ${env.FRONTEND_IMAGE}:${env.IMAGE_TAG}"
-                    echo "Backend:  ${env.BACKEND_IMAGE}:${env.IMAGE_TAG}"
+                    echo "Backend: ${env.BACKEND_IMAGE}:${env.IMAGE_TAG}"
                 }
             }
         }
@@ -175,11 +223,11 @@ pipeline {
     post {
         always {
             sh 'docker image prune -f || true'
-            echo 'Application CI pipeline completed.'
+            echo 'Application CI pipeline execution completed.'
         }
 
         success {
-            echo 'Pipeline completed. Check individual stages for failures.'
+            echo 'Pipeline completed. Check individual stage results.'
         }
 
         failure {
