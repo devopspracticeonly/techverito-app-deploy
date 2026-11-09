@@ -1,266 +1,123 @@
-
 pipeline {
     agent any
 
-    options {
-        timestamps()
-        skipDefaultCheckout(true)
-        disableConcurrentBuilds()
+    tools {
+        maven 'maven'
     }
 
-    parameters {
-        choice(
-            name: 'DEPLOY_ENV',
-            choices: ['dev', 'test', 'prod'],
-            description: 'Select the deployment environment'
-        )
-    }
-
-    environment {
-        AWS_REGION       = 'ap-south-1'
-        AWS_ACCOUNT_ID   = 'YOUR_AWS_ACCOUNT_ID'
-
-        ECR_BACKEND      = 'employee-backend'
-        ECR_FRONTEND     = 'employee-frontend'
-
-        BACKEND_DIR      = 'application/backend'
-        FRONTEND_DIR     = 'application/frontend'
-
-        HELM_VALUES      = 'helm/employee-management'
-        IMAGE_TAG        = "${BUILD_NUMBER}-${GIT_COMMIT_SHORT}"
-
-        SONAR_PROJECT    = 'employee-management'
-    }
+	parameters {
+		string(
+			name: 'AWS_REGION',
+			defaultValue: 'ap-south-1',
+			description: 'AWS Region'
+		)
+	
+		string(
+			name: 'ACCOUNT_ID',
+			defaultValue: '736865445725',
+			description: 'AWS Account ID'
+		)
+	
+		string(
+			name: 'ECR_REPO',
+			defaultValue: 'microservice-demo',
+			description: 'ECR Repository'
+		)
+	}
+	
+	environment {
+		AWS_REGION = "${params.AWS_REGION}"
+		ACCOUNT_ID = "${params.ACCOUNT_ID}"
+		ECR_REPO   = "${params.ECR_REPO}"
+	
+		ECR_URI = "${params.ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com/${params.ECR_REPO}"
+	}
 
     stages {
 
-        stage('Checkout') {
+        stage('Build') {
             steps {
-                checkout scm
-
-                script {
-                    env.GIT_COMMIT_SHORT =
-                        sh(
-                            script: 'git rev-parse --short HEAD',
-                            returnStdout: true
-                        ).trim()
-
-                    env.IMAGE_TAG =
-                        "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
-
-                    echo "Building image tag: ${env.IMAGE_TAG}"
-                    echo "Target environment: ${params.DEPLOY_ENV}"
-                }
-            }
-        }
-
-        stage('Validate Source') {
-            steps {
-                sh '''
-                    set -e
-
-                    test -f application/backend/go.mod
-                    test -f application/backend/main.go
-                    test -f application/frontend/package.json
-
-                    echo "Source structure validated"
-                '''
-            }
-        }
-
-        stage('Backend Tests') {
-            steps {
-                dir("${BACKEND_DIR}") {
-                    sh '''
-                        set -e
-                        go mod download
-                        go test ./...
-                    '''
-                }
-            }
-        }
-
-        stage('Frontend Tests') {
-            steps {
-                dir("${FRONTEND_DIR}") {
-                    sh '''
-                        set -e
-                        npm ci
-                        CI=true npm test -- --watchAll=false
-                        npm run build
-                    '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh 'mvn clean package'
                 }
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('SonarQube-Server') {
-                    sh '''
-                        sonar-scanner \
-                          -Dsonar.projectKey=employee-management \
-                          -Dsonar.projectName=Employee-Management \
-                          -Dsonar.sources=application \
-                          -Dsonar.exclusions=**/node_modules/**,**/build/**,**/vendor/**
-                    '''
-                }
-            }
-        }
-
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    script {
-                        def qualityGate = waitForQualityGate()
-                        if (qualityGate.status != 'OK') {
-                            error "SonarQube Quality Gate failed: ${qualityGate.status}"
-                        }
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                        mvn sonar:sonar \
+                        -Dsonar.projectKey=devops-handson-activities
+                        '''
                     }
                 }
             }
         }
 
-        stage('Trivy Filesystem Scan') {
+        stage('Upload Artifact to Nexus') {
             steps {
-                sh '''
-                    set -e
-
-                    trivy fs \
-                      --exit-code 1 \
-                      --severity HIGH,CRITICAL \
-                      --ignore-unfixed \
-                      .
-                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh 'mvn deploy'
+                }
             }
         }
 
-        stage('Build Docker Images') {
+        stage('Docker Build') {
             steps {
-                sh '''
-                    set -e
-
-                    docker build \
-                      -t employee-backend:${IMAGE_TAG} \
-                      ${BACKEND_DIR}
-
-                    docker build \
-                      -t employee-frontend:${IMAGE_TAG} \
-                      ${FRONTEND_DIR}
-                '''
-            }
-        }
-
-        stage('Trivy Image Scan') {
-            steps {
-                sh '''
-                    set -e
-
-                    trivy image \
-                      --exit-code 1 \
-                      --severity HIGH,CRITICAL \
-                      --ignore-unfixed \
-                      employee-backend:${IMAGE_TAG}
-
-                    trivy image \
-                      --exit-code 1 \
-                      --severity HIGH,CRITICAL \
-                      --ignore-unfixed \
-                      employee-frontend:${IMAGE_TAG}
-                '''
-            }
-        }
-
-        stage('Login to AWS ECR') {
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-credentials'
-                ]]) {
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
-                        set -e
-
-                        aws sts get-caller-identity
-
-                        aws ecr get-login-password \
-                          --region ${AWS_REGION} |
-                        docker login \
-                          --username AWS \
-                          --password-stdin \
-                          ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    docker build -t microservice-demo:v1 .
                     '''
                 }
             }
         }
 
-        stage('Push Images to ECR') {
+        stage('Trivy Scan') {
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-credentials'
-                ]]) {
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
-                        set -e
-
-                        BACKEND_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_BACKEND}"
-                        FRONTEND_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_FRONTEND}"
-
-                        docker tag employee-backend:${IMAGE_TAG} ${BACKEND_IMAGE}:${IMAGE_TAG}
-                        docker tag employee-frontend:${IMAGE_TAG} ${FRONTEND_IMAGE}:${IMAGE_TAG}
-
-                        docker push ${BACKEND_IMAGE}:${IMAGE_TAG}
-                        docker push ${FRONTEND_IMAGE}:${IMAGE_TAG}
+                    trivy image \
+                    --severity HIGH,CRITICAL \
+                    microservice-demo:v1
                     '''
                 }
             }
         }
 
-        stage('Production Approval') {
-            when {
-                expression { params.DEPLOY_ENV == 'prod' }
-            }
+        stage('ECR Login') {
             steps {
-                input message: 'Approve production deployment?',
-                      ok: 'Approve'
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                    aws ecr get-login-password \
+                    --region $AWS_REGION | \
+                    docker login \
+                    --username AWS \
+                    --password-stdin \
+                    $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+                    '''
+                }
             }
         }
 
-        stage('Update Helm GitOps Values') {
+        stage('Tag Image') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'git-credentials',
-                    usernameVariable: 'GIT_USERNAME',
-                    passwordVariable: 'GIT_TOKEN'
-                )]) {
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     sh '''
-                        set -e
+                    docker tag microservice-demo:v1 $ECR_URI:${BUILD_NUMBER}
+                    docker tag microservice-demo:v1 $ECR_URI:latest
+                    '''
+                }
+            }
+        }
 
-                        VALUES_FILE="${HELM_VALUES}/values-${DEPLOY_ENV}.yaml"
-
-                        test -f "$VALUES_FILE"
-
-                        BACKEND_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_BACKEND}"
-                        FRONTEND_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_FRONTEND}"
-
-                        git config user.name "Jenkins"
-                        git config user.email "jenkins@example.com"
-
-                        # Requires yq v4
-                        yq -i '.backend.image.repository = strenv(BACKEND_IMAGE)' "$VALUES_FILE"
-                        yq -i '.backend.image.tag = strenv(IMAGE_TAG)' "$VALUES_FILE"
-                        yq -i '.frontend.image.repository = strenv(FRONTEND_IMAGE)' "$VALUES_FILE"
-                        yq -i '.frontend.image.tag = strenv(IMAGE_TAG)' "$VALUES_FILE"
-
-                        git add "$VALUES_FILE"
-
-                        if git diff --cached --quiet; then
-                            echo "No Helm values changes to commit"
-                        else
-                            git commit -m "Deploy ${IMAGE_TAG} to ${DEPLOY_ENV}"
-
-                            git push \
-                              https://${GIT_USERNAME}:${GIT_TOKEN}@${GIT_URL#https://} \
-                              HEAD:${GIT_BRANCH}
-                        fi
+        stage('Push Image To ECR') {
+            steps {
+                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                    sh '''
+                    docker push $ECR_URI:${BUILD_NUMBER}
+                    docker push $ECR_URI:latest
                     '''
                 }
             }
@@ -268,20 +125,21 @@ pipeline {
     }
 
     post {
+
+        always {
+            echo 'Pipeline execution completed.'
+        }
+
         success {
-            echo "CI pipeline completed successfully."
-            echo "Environment: ${params.DEPLOY_ENV}"
-            echo "Image tag: ${env.IMAGE_TAG}"
-            echo "Argo CD will reconcile the updated Helm values."
+            echo 'Docker image pushed successfully to ECR.'
+        }
+
+        unstable {
+            echo 'One or more stages failed, but pipeline continued.'
         }
 
         failure {
-            echo "Pipeline failed. Check the failed stage and Jenkins logs."
-        }
-
-        always {
-            sh 'docker logout ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com || true'
-            cleanWs()
+            echo 'Pipeline failed.'
         }
     }
 }
