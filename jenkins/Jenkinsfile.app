@@ -103,25 +103,28 @@ pipeline {
         }
 
         stage('Build Frontend') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    script {
-                        if (env.CHECKOUT_READY != 'true') {
-                            error('Checkout failed. Cannot build frontend.')
-                        }
-                    }
-
-                    sh '''
-                        set -e
-
-                        docker build \
-                          -f "$FRONTEND_DOCKERFILE" \
-                          -t "$FRONTEND_IMAGE:$IMAGE_TAG" \
-                          "$FRONTEND_DIR"
-                    '''
+    steps {
+        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+            script {
+                if (env.CHECKOUT_READY != 'true') {
+                    error('Checkout failed. Cannot build frontend.')
                 }
             }
+
+            sh '''
+                set -e
+
+                test -f docker/frontend/Dockerfile
+                test -f frontend/package.json
+
+                docker build \
+                  -f docker/frontend/Dockerfile \
+                  -t "$FRONTEND_IMAGE:$IMAGE_TAG" \
+                  ./frontend
+            '''
         }
+    }
+}
 
         stage('Build Backend') {
             steps {
