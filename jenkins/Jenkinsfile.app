@@ -45,14 +45,6 @@ pipeline {
             }
         }
 
-        stage('Upload Artifact to Nexus') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                    sh 'mvn deploy'
-                }
-            }
-        }
-
         stage('Docker Build') {
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
